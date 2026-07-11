@@ -293,7 +293,7 @@
   <header class="app-header">
     <div class="ribbon" aria-hidden="true"></div>
     <h1 class="wordmark">Diario di <em>Lavoro</em></h1>
-    <div class="subhead">worklog personale</div>
+    <div class="subhead">worklog personale · build 3</div>
   </header>
 
   <div id="banner" class="banner">
@@ -417,6 +417,12 @@
   <input type="file" id="importInput" class="hidden-input" accept="application/json,.json">
 
 <script>
+window.addEventListener("error", function(ev){
+  var b=document.getElementById("banner");
+  if(b){ b.classList.add("show"); b.innerHTML="<b>Errore JS:</b> "+(ev.message||"")+" — "+(ev.filename||"")+":"+(ev.lineno||""); }
+});
+</script>
+<script>
 (function(){
   "use strict";
 
@@ -426,16 +432,8 @@
 
   function openDB(){
     return new Promise((resolve)=>{
+      let done=false;
+      const finish=(mem)=>{ if(done)return; done=true; if(mem)memoryMode=true; resolve(); };
+      const timer=setTimeout(()=>finish(true),1500); // se lo storage non risponde, si prosegue in memoria
       try{
-        if(!("indexedDB" in window)){ memoryMode=true; return resolve(); }
-        const req=indexedDB.open(DB_NAME,1);
-        req.onupgradeneeded=()=>{ req.result.createObjectStore(STORE,{keyPath:"id"}); };
-        req.onsuccess=()=>{ idb=req.result; resolve(); };
-        req.onerror=()=>{ memoryMode=true; resolve(); };
-      }catch(e){ memoryMode=true; resolve(); }
-    });
-  }
-  function store(mode){ return idb.transaction(STORE,mode).objectStore(STORE); }
-  function dbGetAll(){
-    if(memoryMode) return Promise.resolve(memStore.slice());
-    return new Pr
+        if(!("indexedDB" in window) || !window.indexedDB){ clearTimeout(timer); return fi
