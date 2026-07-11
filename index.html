@@ -293,7 +293,7 @@
   <header class="app-header">
     <div class="ribbon" aria-hidden="true"></div>
     <h1 class="wordmark">Diario di <em>Lavoro</em></h1>
-    <div class="subhead">worklog personale · build 3</div>
+    <div class="subhead" id="subhead">worklog personale · build 3</div>
   </header>
 
   <div id="banner" class="banner">
@@ -417,10 +417,9 @@
   <input type="file" id="importInput" class="hidden-input" accept="application/json,.json">
 
 <script>
-window.addEventListener("error", function(ev){
-  var b=document.getElementById("banner");
-  if(b){ b.classList.add("show"); b.innerHTML="<b>Errore JS:</b> "+(ev.message||"")+" — "+(ev.filename||"")+":"+(ev.lineno||""); }
-});
+function __diarioErr(msg){ var b=document.getElementById("banner"); if(b){ b.classList.add("show"); b.innerHTML="<b>Errore:</b> "+msg; } }
+window.addEventListener("error", function(ev){ __diarioErr((ev.message||"")+" — "+(ev.filename||"")+":"+(ev.lineno||"")); });
+window.addEventListener("unhandledrejection", function(ev){ __diarioErr("promise: "+(ev.reason && ev.reason.message ? ev.reason.message : ev.reason)); });
 </script>
 <script>
 (function(){
@@ -436,4 +435,509 @@ window.addEventListener("error", function(ev){
       const finish=(mem)=>{ if(done)return; done=true; if(mem)memoryMode=true; resolve(); };
       const timer=setTimeout(()=>finish(true),1500); // se lo storage non risponde, si prosegue in memoria
       try{
-        if(!("indexedDB" in window) || !window.indexedDB){ clearTimeout(timer); return fi
+        if(!("indexedDB" in window) || !window.indexedDB){ clearTimeout(timer); return finish(true); }
+        const req=indexedDB.open(DB_NAME,1);
+        req.onupgradeneeded=()=>{ try{ req.result.createObjectStore(STORE,{keyPath:"id"}); }catch(e){} };
+        req.onsuccess=()=>{ clearTimeout(timer); idb=req.result; finish(false); };
+        req.onerror=()=>{ clearTimeout(timer); finish(true); };
+        req.onblocked=()=>{ clearTimeout(timer); finish(true); };
+      }catch(e){ clearTimeout(timer); finish(true); }
+    });
+  }
+  function store(mode){ return idb.transaction(STORE,mode).objectStore(STORE); }
+  function dbGetAll(){
+    if(memoryMode) return Promise.resolve(memStore.slice());
+    return new Promise((res,rej)=>{ const r=store("readonly").getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>rej(r.error); });
+  }
+  function dbPut(entry){
+    if(memoryMode){ const i=memStore.findIndex(e=>e.id===entry.id); if(i>=0)memStore[i]=entry; else memStore.push(entry); return Promise.resolve(); }
+    return new Promise((res,rej)=>{ const r=store("readwrite").put(entry); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); });
+  }
+  function dbDelete(id){
+    if(memoryMode){ memStore=memStore.filter(e=>e.id!==id); return Promise.resolve(); }
+    return new Promise((res,rej)=>{ const r=store("readwrite").delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); });
+  }
+  /* ---------------- Stato ---------------- */
+  let entries=[];
+  let editingId=null;
+  let draftPhotos=[]; // {id, caption, blob, type, url}
+  let activeUrls=new Set();
+  const $=(s)=>document.querySelector(s);
+  const uid=()=> (crypto.randomUUID? crypto.randomUUID() : Date.now()+"-"+Math.random().toString(16).slice(2));
+
+  /* ---------------- Date helpers ---------------- */
+  const WD=["dom","lun","mar","mer","gio","ven","sab"];
+  const MO=["gen","feb","mar","apr","mag","giu","lug","ago","set","ott","nov","dic"];
+  const MO_LONG=["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"];
+  function parseDate(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
+  function dayLabel(s){ const d=parseDate(s); return WD[d.getDay()]+" "+d.getDate()+" "+MO[d.getMonth()]; }
+  function fullDate(s){ const d=parseDate(s); return d.getDate()+" "+MO_LONG[d.getMonth()]+" "+d.getFullYear(); }
+  function todayISO(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+  function nowTime(){ const d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+
+  /* ---------------- Render ---------------- */
+  function releaseUrls(){ activeUrls.forEach(u=>URL.revokeObjectURL(u)); activeUrls.clear(); }
+  function urlFor(blob){ const u=URL.createObjectURL(blob); activeUrls.add(u); return u; }
+
+  function render(){
+    releaseUrls();
+    const q=$("#search").value.trim().toLowerCase();
+    const list=$("#list");
+    list.innerHTML="";
+
+    let data=entries.slice();
+    if(q){
+      data=data.filter(e=>{
+        const hay=[e.title,e.notes,(e.tags||[]).join(" "),dayLabel(e.date),fullDate(e.date)].join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    data.sort((a,b)=> (b.date+b.time).localeCompare(a.date+a.time));
+
+    if(data.length===0){
+      list.innerHTML=`
+        <div class="empty">
+          <div class="mk"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5a1 1 0 0 1 1-1h11l4 4v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M8 9h6M8 13h8M8 17h5"/></svg></div>
+          <h2>${q? "Nessun risultato" : "Il tuo diario è vuoto"}</h2>
+          <p>${q? "Prova con un altro termine di ricerca." : "Aggiungi la prima cosa successa oggi: un titolo, due righe e qualche foto."}</p>
+        </div>`;
+      return;
+    }
+
+    // Raggruppa per data
+    const groups={};
+    data.forEach(e=>{ (groups[e.date]=groups[e.date]||[]).push(e); });
+    const dates=Object.keys(groups).sort((a,b)=>b.localeCompare(a));
+
+    dates.forEach((date,gi)=>{
+      const group=document.createElement("section");
+      group.className="day-group"+(gi===0?" active":"");
+      const items=groups[date];
+      group.innerHTML=`
+        <div class="day-head">
+          <span class="day-tab">${dayLabel(date)}</span>
+          <span class="day-line"></span>
+          <span class="day-count">${items.length} ${items.length===1?"voce":"voci"}</span>
+        </div>`;
+      items.forEach(e=> group.appendChild(entryCard(e)));
+      list.appendChild(group);
+    });
+  }
+
+  function entryCard(e){
+    const el=document.createElement("article");
+    el.className="entry";
+    const photos=e.photos||[];
+    const shown=photos.slice(0,4);
+    const extra=photos.length-shown.length;
+
+    let thumbsHtml="";
+    if(photos.length){
+      thumbsHtml='<div class="thumbs">';
+      shown.forEach((p,i)=>{ thumbsHtml+=`<img class="thumb" data-eid="${e.id}" data-pi="${i}" src="${urlFor(p.blob)}" alt="${escapeHtml(p.caption||'')}">`; });
+      if(extra>0) thumbsHtml+=`<div class="thumb-more">+${extra}</div>`;
+      thumbsHtml+='</div>';
+    }
+
+    let tagsHtml="";
+    if(e.tags && e.tags.length){
+      tagsHtml='<div class="tags">'+e.tags.map(t=>`<span class="tag">#${escapeHtml(t)}</span>`).join("")+'</div>';
+    }
+
+    el.innerHTML=`
+      <div class="entry-top">
+        <h3 class="entry-title">${escapeHtml(e.title||"(senza titolo)")}</h3>
+        <span class="entry-time">${e.time||""}</span>
+      </div>
+      ${e.notes? `<p class="entry-notes">${escapeHtml(e.notes)}</p>`:""}
+      ${thumbsHtml}
+      ${tagsHtml}
+      <div class="entry-actions">
+        <button class="ghost-btn accent" data-act="slide" data-id="${e.id}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          Crea slide
+        </button>
+        <span class="spacer"></span>
+        <button class="ghost-btn" data-act="edit" data-id="${e.id}">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h4L18 10l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>
+          Modifica
+        </button>
+      </div>`;
+    return el;
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
+
+  /* ---------------- Editor ---------------- */
+  function openEditor(entry){
+    editingId = entry? entry.id : null;
+    $("#editorTitle").textContent = entry? "Modifica voce" : "Nuova voce";
+    $("#deleteBtn").style.display = entry? "block" : "none";
+    $("#fDate").value = entry? entry.date : todayISO();
+    $("#fTime").value = entry? (entry.time||nowTime()) : nowTime();
+    $("#fTitle").value = entry? entry.title : "";
+    $("#fNotes").value = entry? entry.notes : "";
+    $("#fTags").value = entry? (entry.tags||[]).join(", ") : "";
+
+    clearDraft();
+    if(entry){
+      (entry.photos||[]).forEach(p=>{
+        const url=URL.createObjectURL(p.blob);
+        draftPhotos.push({id:p.id||uid(), caption:p.caption||"", blob:p.blob, type:p.type, url});
+      });
+    }
+    renderDraft();
+    showOverlay("#editorOverlay");
+    setTimeout(()=>$("#fTitle").focus(),50);
+  }
+  function clearDraft(){ draftPhotos.forEach(p=>URL.revokeObjectURL(p.url)); draftPhotos=[]; }
+  function renderDraft(){
+    const g=$("#draftGrid"); g.innerHTML="";
+    draftPhotos.forEach((p,i)=>{
+      const row=document.createElement("div");
+      row.className="draft-item";
+      row.innerHTML=`
+        <img src="${p.url}" alt="">
+        <input type="text" placeholder="Didascalia (facoltativa)" value="${escapeHtml(p.caption)}" data-i="${i}">
+        <button class="draft-del" data-i="${i}" aria-label="Rimuovi foto">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>`;
+      g.appendChild(row);
+    });
+  }
+  function addFiles(files){
+    Array.from(files).forEach(f=>{
+      if(!f.type.startsWith("image/")) return;
+      const url=URL.createObjectURL(f);
+      draftPhotos.push({id:uid(), caption:"", blob:f, type:f.type, url});
+    });
+    renderDraft();
+  }
+  async function saveEntry(){
+    const date=$("#fDate").value || todayISO();
+    const title=$("#fTitle").value.trim();
+    const notes=$("#fNotes").value.trim();
+    if(!title && !notes && draftPhotos.length===0){ shake($("#saveBtn")); return; }
+    const tags=$("#fTags").value.split(",").map(t=>t.trim().replace(/^#/,"")).filter(Boolean);
+    const entry={
+      id: editingId || uid(),
+      date, time: $("#fTime").value || nowTime(),
+      title: title || "(senza titolo)",
+      notes,
+      tags,
+      photos: draftPhotos.map(p=>({id:p.id, caption:p.caption, blob:p.blob, type:p.type}))
+    };
+    await dbPut(entry);
+    clearDraft();
+    hideOverlay("#editorOverlay");
+    await refresh();
+  }
+  async function deleteEntry(){
+    if(!editingId) return;
+    if(!confirm("Eliminare questa voce? L'operazione non è reversibile.")) return;
+    await dbDelete(editingId);
+    clearDraft();
+    hideOverlay("#editorOverlay");
+    await refresh();
+  }
+
+  /* ---------------- Slide (canvas) ---------------- */
+  let slideBlob=null, slideEntry=null;
+
+  function loadImage(blob){
+    return new Promise((res)=>{
+      const url=URL.createObjectURL(blob);
+      const img=new Image();
+      img.onload=()=>{ res({img,url}); };
+      img.onerror=()=>{ URL.revokeObjectURL(url); res(null); };
+      img.src=url;
+    });
+  }
+  function roundRect(ctx,x,y,w,h,r){
+    r=Math.min(r,w/2,h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+  function drawCover(ctx,img,x,y,w,h,r){
+    ctx.save();
+    roundRect(ctx,x,y,w,h,r); ctx.clip();
+    const ir=img.width/img.height, rr=w/h;
+    let dw,dh,dx,dy;
+    if(ir>rr){ dh=h; dw=h*ir; dx=x-(dw-w)/2; dy=y; }
+    else { dw=w; dh=w/ir; dx=x; dy=y-(dh-h)/2; }
+    ctx.drawImage(img,dx,dy,dw,dh);
+    ctx.restore();
+    ctx.save();
+    roundRect(ctx,x+.5,y+.5,w-1,h-1,r);
+    ctx.strokeStyle="rgba(255,255,255,.10)"; ctx.lineWidth=1; ctx.stroke();
+    ctx.restore();
+  }
+  function gridRects(n,x,y,w,h,g){
+    if(n<=1) return [[x,y,w,h]];
+    if(n===2){ const cw=(w-g)/2; return [[x,y,cw,h],[x+cw+g,y,cw,h]]; }
+    if(n===3){ const lw=(w-g)*0.60, rw=(w-g)-lw, rh=(h-g)/2; return [[x,y,lw,h],[x+lw+g,y,rw,rh],[x+lw+g,y+rh+g,rw,rh]]; }
+    const cw=(w-g)/2, rh=(h-g)/2;
+    return [[x,y,cw,rh],[x+cw+g,y,cw,rh],[x,y+rh+g,cw,rh],[x+cw+g,y+rh+g,cw,rh]];
+  }
+  function wrap(ctx,text,maxW){
+    const words=(text||"").replace(/\n/g," ").split(/\s+/).filter(Boolean);
+    const lines=[]; let line="";
+    for(const w of words){
+      const t=line?line+" "+w:w;
+      if(ctx.measureText(t).width>maxW && line){ lines.push(line); line=w; }
+      else line=t;
+    }
+    if(line) lines.push(line);
+    return lines;
+  }
+  function drawWrapped(ctx,text,x,y,maxW,lh,maxLines){
+    let lines=wrap(ctx,text,maxW);
+    if(lines.length>maxLines){
+      lines=lines.slice(0,maxLines);
+      let last=lines[maxLines-1];
+      while(ctx.measureText(last+"…").width>maxW && last.length>1) last=last.slice(0,-1);
+      lines[maxLines-1]=last+"…";
+    }
+    lines.forEach((ln,i)=>ctx.fillText(ln,x,y+i*lh));
+    return y+lines.length*lh;
+  }
+
+  async function drawSlide(entry){
+    if(document.fonts && document.fonts.ready){ try{ await document.fonts.ready; }catch(e){} }
+    const canvas=$("#slideCanvas");
+    const ctx=canvas.getContext("2d");
+    const W=1080,H=1350,P=80;
+    ctx.clearRect(0,0,W,H);
+
+    // Sfondo
+    const bg=ctx.createLinearGradient(0,0,0,H);
+    bg.addColorStop(0,"#1A1F2B"); bg.addColorStop(1,"#12151E");
+    ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+    // Cornice pagina
+    ctx.strokeStyle="rgba(217,164,65,.18)"; ctx.lineWidth=2;
+    ctx.strokeRect(28,28,W-56,H-56);
+
+    ctx.textBaseline="top";
+
+    // Ribbon + intestazione
+    ctx.fillStyle="#D9A441"; ctx.fillRect(P,52,54,10);
+    ctx.font="600 30px 'IBM Plex Mono',monospace"; ctx.fillStyle="#D9A441";
+    ctx.fillText(fullDate(entry.date).toUpperCase()+"  ·  "+(entry.time||""),P,92);
+    ctx.font="500 24px 'IBM Plex Mono',monospace"; ctx.fillStyle="#6B7385";
+    ctx.textAlign="right"; ctx.fillText("DIARIO DI LAVORO",W-P,96); ctx.textAlign="left";
+
+    // Divisore
+    ctx.strokeStyle="#2C3242"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(P,150); ctx.lineTo(W-P,150); ctx.stroke();
+
+    // Titolo
+    ctx.fillStyle="#ECE7DB"; ctx.font="600 58px 'IBM Plex Serif',serif";
+    const titleBottom=drawWrapped(ctx, entry.title||"", P, 190, W-2*P, 72, 3);
+
+    let y=titleBottom+34;
+    const photos=entry.photos||[];
+
+    // Foto
+    if(photos.length){
+      const loaded=[];
+      for(const p of photos.slice(0,4)){ const r=await loadImage(p.blob); if(r) loaded.push(r); }
+      const photoH=460;
+      const rects=gridRects(loaded.length,P,y,W-2*P,photoH,16);
+      loaded.forEach((r,i)=> drawCover(ctx,r.img,rects[i][0],rects[i][1],rects[i][2],rects[i][3],16));
+      // badge +N
+      if(photos.length>4 && rects[3]){
+        const [bx,by,bw,bh]=rects[3];
+        ctx.save(); roundRect(ctx,bx,by,bw,bh,16); ctx.clip();
+        ctx.fillStyle="rgba(10,12,18,.6)"; ctx.fillRect(bx,by,bw,bh);
+        ctx.fillStyle="#ECE7DB"; ctx.textAlign="center"; ctx.textBaseline="middle";
+        ctx.font="600 54px 'IBM Plex Mono',monospace";
+        ctx.fillText("+"+(photos.length-4),bx+bw/2,by+bh/2);
+        ctx.restore(); ctx.textAlign="left"; ctx.textBaseline="top";
+      }
+      loaded.forEach(r=>URL.revokeObjectURL(r.url));
+      y+=photoH+34;
+    }
+
+    // Note
+    if(entry.notes){
+      ctx.fillStyle="#B8BECC"; ctx.font="400 33px 'IBM Plex Sans',sans-serif";
+      const notesMax=photos.length? 1180 : 1200;
+      const maxLines=Math.max(1,Math.floor((notesMax-y)/46));
+      y=drawWrapped(ctx, entry.notes, P, y, W-2*P, 46, maxLines)+12;
+    }
+
+    // Tag
+    if(entry.tags && entry.tags.length && y<1215){
+      ctx.font="500 26px 'IBM Plex Mono',monospace"; ctx.fillStyle="#D9A441";
+      let tagLine="# "+entry.tags.join("   # ");
+      while(ctx.measureText(tagLine).width>W-2*P && tagLine.length>3) tagLine=tagLine.slice(0,-1);
+      ctx.fillText(tagLine,P,Math.min(y,1215));
+    }
+
+    // Piè di pagina
+    ctx.strokeStyle="#2C3242"; ctx.beginPath(); ctx.moveTo(P,1250); ctx.lineTo(W-P,1250); ctx.stroke();
+    ctx.fillStyle="#8B93A6"; ctx.font="italic 500 28px 'IBM Plex Serif',serif";
+    ctx.fillText("Diario di Lavoro",P,1274);
+
+    slideEntry=entry;
+    slideBlob=await new Promise(r=>canvas.toBlob(r,"image/png",0.95));
+  }
+
+  async function openSlide(entry){
+    await drawSlide(entry);
+    showOverlay("#slideOverlay");
+    const canShareFiles = navigator.canShare && slideBlob && navigator.canShare({files:[new File([slideBlob],"x.png",{type:"image/png"})]});
+    $("#slideHint").textContent = canShareFiles
+      ? "Tocca “Condividi immagine” per inviarla su WhatsApp, email o altre app con la foto già allegata."
+      : "Su questo dispositivo la condivisione diretta con allegato non è disponibile: usa “Scarica PNG” e allega l'immagine manualmente.";
+  }
+
+  async function shareNative(){
+    if(!slideBlob) return;
+    const file=new File([slideBlob],"diario-"+(slideEntry?slideEntry.date:"voce")+".png",{type:"image/png"});
+    const text=(slideEntry?slideEntry.title:"")+ (slideEntry&&slideEntry.notes? "\n\n"+slideEntry.notes : "");
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      try{ await navigator.share({files:[file], title:slideEntry?slideEntry.title:"Diario di Lavoro", text}); return; }
+      catch(e){ if(e && e.name==="AbortError") return; }
+    }
+    downloadBlob(slideBlob, file.name);
+    alert("Condivisione diretta non disponibile: l'immagine è stata scaricata, allegala manualmente al messaggio.");
+  }
+  function shareWa(){
+    const t=(slideEntry?slideEntry.title:"")+(slideEntry&&slideEntry.notes? "\n"+slideEntry.notes:"");
+    window.open("https://wa.me/?text="+encodeURIComponent(t.trim()||"Diario di Lavoro"),"_blank");
+  }
+  function downloadSlide(){ if(slideBlob) downloadBlob(slideBlob,"diario-"+(slideEntry?slideEntry.date:"voce")+".png"); }
+  function downloadBlob(blob,name){
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click();
+    a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+
+  /* ---------------- Export / Import ---------------- */
+  function blobToDataURL(blob){ return new Promise((res)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(blob); }); }
+  async function dataURLToBlob(d){ return (await fetch(d)).blob(); }
+
+  async function exportData(){
+    const all=await dbGetAll();
+    const out={ app:"diario-di-lavoro", version:1, exportedAt:new Date().toISOString(), entries:[] };
+    for(const e of all){
+      const photos=[];
+      for(const p of (e.photos||[])){ photos.push({id:p.id, caption:p.caption, type:p.type, data:await blobToDataURL(p.blob)}); }
+      out.entries.push({id:e.id, date:e.date, time:e.time, title:e.title, notes:e.notes, tags:e.tags||[], photos});
+    }
+    const blob=new Blob([JSON.stringify(out)],{type:"application/json"});
+    downloadBlob(blob,"diario-backup-"+todayISO()+".json");
+  }
+  async function importData(file){
+    try{
+      const data=JSON.parse(await file.text());
+      if(!data.entries || !Array.isArray(data.entries)) throw new Error("Formato non valido");
+      let count=0;
+      for(const e of data.entries){
+        const photos=[];
+        for(const p of (e.photos||[])){ if(p.data){ photos.push({id:p.id||uid(), caption:p.caption||"", type:p.type||"image/*", blob:await dataURLToBlob(p.data)}); } }
+        await dbPut({id:e.id||uid(), date:e.date, time:e.time||"", title:e.title||"(senza titolo)", notes:e.notes||"", tags:e.tags||[], photos});
+        count++;
+      }
+      await refresh();
+      alert("Importate "+count+" voci dal backup.");
+    }catch(err){
+      alert("Impossibile leggere il file: "+err.message);
+    }
+  }
+
+  /* ---------------- UI utility ---------------- */
+  function showOverlay(sel){ $(sel).classList.add("show"); document.body.style.overflow="hidden"; }
+  function hideOverlay(sel){ $(sel).classList.remove("show"); document.body.style.overflow=""; }
+  function shake(el){ el.animate([{transform:"translateX(0)"},{transform:"translateX(-6px)"},{transform:"translateX(6px)"},{transform:"translateX(0)"}],{duration:260}); }
+
+  async function refresh(){ entries=await dbGetAll(); render(); }
+
+  /* ---------------- Eventi ---------------- */
+  function wire(){
+    $("#fab").addEventListener("click",()=>openEditor(null));
+    $("#editorClose").addEventListener("click",()=>{clearDraft();hideOverlay("#editorOverlay");});
+    $("#editorCancel").addEventListener("click",()=>{clearDraft();hideOverlay("#editorOverlay");});
+    $("#saveBtn").addEventListener("click",saveEntry);
+    $("#deleteBtn").addEventListener("click",deleteEntry);
+
+    $("#cameraBtn").addEventListener("click",()=>$("#cameraInput").click());
+    $("#galleryBtn").addEventListener("click",()=>$("#galleryInput").click());
+    $("#cameraInput").addEventListener("change",e=>{addFiles(e.target.files); e.target.value="";});
+    $("#galleryInput").addEventListener("change",e=>{addFiles(e.target.files); e.target.value="";});
+
+    $("#draftGrid").addEventListener("input",e=>{
+      const i=e.target.getAttribute("data-i");
+      if(i!==null && draftPhotos[i]) draftPhotos[i].caption=e.target.value;
+    });
+    $("#draftGrid").addEventListener("click",e=>{
+      const btn=e.target.closest(".draft-del"); if(!btn) return;
+      const i=+btn.getAttribute("data-i");
+      URL.revokeObjectURL(draftPhotos[i].url);
+      draftPhotos.splice(i,1); renderDraft();
+    });
+
+    $("#list").addEventListener("click",e=>{
+      const actBtn=e.target.closest("[data-act]");
+      if(actBtn){
+        const id=actBtn.getAttribute("data-id");
+        const entry=entries.find(x=>x.id===id);
+        if(!entry) return;
+        if(actBtn.getAttribute("data-act")==="edit") openEditor(entry);
+        else openSlide(entry);
+        return;
+      }
+      const th=e.target.closest(".thumb");
+      if(th){
+        const entry=entries.find(x=>x.id===th.getAttribute("data-eid"));
+        const p=entry && entry.photos[+th.getAttribute("data-pi")];
+        if(p){ const img=$("#lightboxImg"); img.src=urlFor(p.blob); $("#lightbox").classList.add("show"); }
+      }
+    });
+
+    $("#lightbox").addEventListener("click",()=>$("#lightbox").classList.remove("show"));
+    $("#lightboxClose").addEventListener("click",()=>$("#lightbox").classList.remove("show"));
+
+    $("#slideClose").addEventListener("click",()=>hideOverlay("#slideOverlay"));
+    $("#shareNative").addEventListener("click",shareNative);
+    $("#shareWa").addEventListener("click",shareWa);
+    $("#shareDownload").addEventListener("click",downloadSlide);
+
+    $("#search").addEventListener("input",render);
+
+    $("#exportBtn").addEventListener("click",exportData);
+    $("#importBtn").addEventListener("click",()=>$("#importInput").click());
+    $("#importInput").addEventListener("change",e=>{ if(e.target.files[0]) importData(e.target.files[0]); e.target.value=""; });
+
+    // Chiudi overlay toccando lo sfondo
+    document.querySelectorAll(".overlay").forEach(ov=>{
+      ov.addEventListener("click",e=>{ if(e.target===ov){ if(ov.id==="editorOverlay") clearDraft(); hideOverlay("#"+ov.id); } });
+    });
+    document.addEventListener("keydown",e=>{
+      if(e.key==="Escape"){
+        document.querySelectorAll(".overlay.show").forEach(ov=>{ if(ov.id==="editorOverlay") clearDraft(); hideOverlay("#"+ov.id); });
+        $("#lightbox").classList.remove("show");
+      }
+    });
+  }
+
+  /* ---------------- Avvio ---------------- */
+  async function init(){
+    wire();                 // interfaccia subito reattiva, indipendente dallo storage
+    var sh=document.getElementById("subhead"); if(sh) sh.textContent="worklog personale · build 3 · js attivo";
+    await openDB();
+    if(memoryMode) $("#banner").classList.add("show");
+    await refresh();
+  }
+  init().catch(function(err){ __diarioErr("avvio: "+(err&&err.message?err.message:err)); });
+})();
+</script>
+</body>
+</html>
